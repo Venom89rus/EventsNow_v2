@@ -15,6 +15,7 @@ from bot.handlers.admin import router as admin_router
 
 from bot.db.database import init_db, close_db
 from bot.db.schema import ensure_schema
+from bot.handlers.promo import router as promo_router
 
 logging.basicConfig(level=logging.INFO)
 
@@ -53,6 +54,7 @@ async def main() -> None:
     dp.include_router(organizer_router)
     dp.include_router(resident_router)
     dp.include_router(admin_router)
+    dp.include_router(promo_router)
 
     @dp.message(CommandStart())
     async def cmd_start(message: Message) -> None:
