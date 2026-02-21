@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Iterable, Optional
+import os
+from typing import Any, Iterable, Optional
 
 from aiogram import Router, F
 from aiogram.types import (
@@ -11,21 +12,40 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
 )
+from aiogram.enums import ParseMode
 
-from bot.db.repositories import repo, Event
+from bot.db.repositories import repo
 
-try:
-    from bot.config import ADMIN_IDS  # type: ignore
-except Exception:
-    ADMIN_IDS = []
 
 router = Router()
 
 
+# =========================
+# ADMIN IDS
+# =========================
+def _load_admin_ids() -> set[int]:
+    # ENV: ADMIN_IDS="123,456"
+    raw = (os.getenv("ADMIN_IDS") or "").strip()
+    if not raw:
+        return set()
+    ids: set[int] = set()
+    for part in raw.split(","):
+        part = part.strip()
+        if part.isdigit():
+            ids.add(int(part))
+    return ids
+
+
+ADMIN_IDS = _load_admin_ids()
+
+
 def is_admin(user_id: int) -> bool:
-    return user_id in set(int(x) for x in (ADMIN_IDS or []))
+    return user_id in ADMIN_IDS
 
 
+# =========================
+# UI
+# =========================
 def admin_menu_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -48,13 +68,15 @@ def main_menu_kb() -> ReplyKeyboardMarkup:
     )
 
 
-def pending_list_kb(events: Iterable[Event]) -> InlineKeyboardMarkup:
+def pending_list_kb(events: Iterable[Any]) -> InlineKeyboardMarkup:
     buttons: list[list[InlineKeyboardButton]] = []
     for e in events:
-        label = f"🆔 {e.id} · {e.title}"
+        eid = int(getattr(e, "id"))
+        title = str(getattr(e, "title", "") or "")
+        label = f"🆔 {eid} · {title}"
         if len(label) > 45:
             label = label[:45].rstrip() + "…"
-        buttons.append([InlineKeyboardButton(text=label, callback_data=f"adm_show:{e.id}")])
+        buttons.append([InlineKeyboardButton(text=label, callback_data=f"adm_show:{eid}")])
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back_menu")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -69,73 +91,100 @@ def moderation_kb(event_id: int, has_more: bool, next_id: Optional[int]) -> Inli
         row2.append(InlineKeyboardButton(text="📄 Подробнее", callback_data=f"adm_more:{event_id}"))
     row2.append(InlineKeyboardButton(text="⬅️ К списку", callback_data="adm_list"))
 
-    kb: list[list[InlineKeyboardButton]] = [row1, row2]
+    inline_keyboard = [row1, row2]
     if next_id is not None:
-        kb.append([InlineKeyboardButton(text="➡️ Следующее", callback_data=f"adm_show:{next_id}")])
-    return InlineKeyboardMarkup(inline_keyboard=kb)
+        inline_keyboard.append([InlineKeyboardButton(text="➡️ Следующее", callback_data=f"adm_show:{next_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
+
+
+# =========================
+# HELPERS
+# =========================
+def _safe(v: Any, fallback: str = "—") -> str:
+    if v is None:
+        return fallback
+    s = str(v).strip()
+    return s if s else fallback
 
 
 def short_desc(text: str, limit: int = 100) -> tuple[str, bool]:
-    s = (text or "").strip()
-    if not s:
+    if not text:
         return "—", False
+    s = text.strip()
     if len(s) <= limit:
         return s, False
     return s[:limit].rstrip() + "…", True
 
 
-def build_admin_caption(event: Event) -> tuple[str, bool]:
-    desc_short, cut = short_desc(event.description, 100)
+def build_admin_caption(event: Any) -> tuple[str, bool]:
+    eid = int(getattr(event, "id"))
+    cat = _safe(getattr(event, "category", None))
+    title = _safe(getattr(event, "title", None))
+    location = _safe(getattr(event, "location", None))
+    price = _safe(getattr(event, "price_text", None))
+    ticket_link = _safe(getattr(event, "ticket_link", None))
+    phone = _safe(getattr(event, "phone", None))
+    organizer_id = _safe(getattr(event, "organizer_id", None))
+    fmt = _safe(getattr(event, "event_format", None), "single")
 
-    if event.event_format == "period":
-        date_text = f"{event.start_date} — {event.end_date}"
-        time_text = f"{event.start_time} — {event.end_time}"
+    # даты/время по формату
+    if fmt == "period":
+        date_text = f"{_safe(getattr(event, 'start_date', None))} — {_safe(getattr(event, 'end_date', None))}"
+        time_text = f"{_safe(getattr(event, 'open_time', None))} — {_safe(getattr(event, 'close_time', None))}"
+    elif fmt == "sessions":
+        date_text = f"{_safe(getattr(event, 'sessions_start_date', None))} — {_safe(getattr(event, 'sessions_end_date', None))}"
+        time_text = _safe(getattr(event, "sessions_times", None))
     else:
-        date_text = event.start_date
-        time_text = event.start_time
+        date_text = _safe(getattr(event, "event_date", None))
+        time_text = _safe(getattr(event, "event_time", None))
 
-    parts = [
+    desc_full = _safe(getattr(event, "description", None), "")
+    desc_short, cut = short_desc(desc_full, 100)
+
+    caption = "\n".join([
         "🛡 <b>Модерация события</b>",
         "",
-        f"🆔 <b>{event.id}</b>",
-        f"{event.category}",
-        f"<b>{event.title}</b>",
+        f"🆔 <b>{eid}</b>",
+        f"{cat}",
+        f"<b>{title}</b>",
         "",
         f"📝 {desc_short}",
         "",
         f"📅 {date_text}",
         f"⏰ {time_text}",
-        f"📍 {event.location or '—'}",
-        f"💰 {event.price_text or '—'}",
-        f"🔗 {event.ticket_link or '—'}",
-        f"📞 {event.phone or '—'}",
-        f"👤 organizer_id: {event.organizer_id}",
-    ]
-    return "\n".join(parts), cut
+        f"📍 {location}",
+        f"💰 {price}",
+        f"🔗 {ticket_link}",
+        f"📞 {phone}",
+        f"👤 organizer_id: {organizer_id}",
+    ])
+    return caption, cut
 
 
 async def _get_next_pending_id(current_id: int) -> Optional[int]:
     pending = await repo.get_pending_events(limit=50)
-    ids = [e.id for e in pending]
+    ids = [int(e.id) for e in pending]
     if not ids:
         return None
     if current_id not in ids:
         return ids[0]
-    idx = ids.index(current_id)
-    return ids[idx + 1] if idx + 1 < len(ids) else None
+    i = ids.index(current_id)
+    return ids[i + 1] if i + 1 < len(ids) else None
 
 
-async def send_event_for_moderation(target: Message | CallbackQuery, event: Event, next_id: Optional[int]) -> None:
+async def send_event_for_moderation(target: Message | CallbackQuery, event: Any, next_id: Optional[int]) -> None:
     caption, cut = build_admin_caption(event)
-    kb = moderation_kb(event_id=event.id, has_more=cut, next_id=next_id)
-    photo_id = event.photo_ids[0] if event.photo_ids else None
+    eid = int(getattr(event, "id"))
+    photos = await repo.get_event_photos(eid)
+    photo_id = photos[0] if photos else None
+
+    kb = moderation_kb(event_id=eid, has_more=cut, next_id=next_id)
 
     if isinstance(target, CallbackQuery):
-        msg = target.message
         if photo_id:
-            await msg.answer_photo(photo=photo_id, caption=caption, reply_markup=kb)
+            await target.message.answer_photo(photo=photo_id, caption=caption, reply_markup=kb)
         else:
-            await msg.answer(caption, reply_markup=kb)
+            await target.message.answer(caption, reply_markup=kb)
         await target.answer()
     else:
         if photo_id:
@@ -144,6 +193,9 @@ async def send_event_for_moderation(target: Message | CallbackQuery, event: Even
             await target.answer(caption, reply_markup=kb)
 
 
+# =========================
+# ENTRY
+# =========================
 @router.message(F.text == "🔧 Админ")
 async def admin_entry(message: Message) -> None:
     if not is_admin(message.from_user.id):
@@ -164,6 +216,9 @@ async def admin_back_to_main(message: Message) -> None:
     await message.answer("🏠 Главное меню", reply_markup=main_menu_kb())
 
 
+# =========================
+# LIST
+# =========================
 @router.message(F.text == "⏳ На модерации")
 async def admin_pending(message: Message) -> None:
     if not is_admin(message.from_user.id):
@@ -209,6 +264,9 @@ async def admin_cb_back_menu(cb: CallbackQuery) -> None:
     await cb.answer()
 
 
+# =========================
+# SHOW
+# =========================
 @router.callback_query(F.data.startswith("adm_show:"))
 async def admin_cb_show(cb: CallbackQuery) -> None:
     if not is_admin(cb.from_user.id):
@@ -225,6 +283,9 @@ async def admin_cb_show(cb: CallbackQuery) -> None:
     await send_event_for_moderation(cb, event, next_id=next_id)
 
 
+# =========================
+# ACTIONS
+# =========================
 @router.callback_query(F.data.startswith("adm_ok:"))
 async def admin_cb_approve(cb: CallbackQuery) -> None:
     if not is_admin(cb.from_user.id):
@@ -233,6 +294,7 @@ async def admin_cb_approve(cb: CallbackQuery) -> None:
 
     event_id = int(cb.data.split(":")[1])
     ok = await repo.approve_event(event_id, admin_id=cb.from_user.id)
+
     if not ok:
         await cb.answer("Не удалось одобрить", show_alert=True)
         return
@@ -240,9 +302,10 @@ async def admin_cb_approve(cb: CallbackQuery) -> None:
     await cb.message.answer(f"✅ Событие <b>{event_id}</b> одобрено.")
     next_id = await _get_next_pending_id(event_id)
     if next_id is not None:
-        nxt = await repo.get_event(next_id)
-        if nxt:
-            await send_event_for_moderation(cb, nxt, next_id=await _get_next_pending_id(next_id))
+        ev = await repo.get_event(next_id)
+        if ev:
+            await send_event_for_moderation(cb, ev, next_id=await _get_next_pending_id(next_id))
+
     await cb.answer("Одобрено")
 
 
@@ -254,6 +317,7 @@ async def admin_cb_reject(cb: CallbackQuery) -> None:
 
     event_id = int(cb.data.split(":")[1])
     ok = await repo.reject_event(event_id, admin_id=cb.from_user.id)
+
     if not ok:
         await cb.answer("Не удалось отклонить", show_alert=True)
         return
@@ -261,12 +325,16 @@ async def admin_cb_reject(cb: CallbackQuery) -> None:
     await cb.message.answer(f"❌ Событие <b>{event_id}</b> отклонено.")
     next_id = await _get_next_pending_id(event_id)
     if next_id is not None:
-        nxt = await repo.get_event(next_id)
-        if nxt:
-            await send_event_for_moderation(cb, nxt, next_id=await _get_next_pending_id(next_id))
+        ev = await repo.get_event(next_id)
+        if ev:
+            await send_event_for_moderation(cb, ev, next_id=await _get_next_pending_id(next_id))
+
     await cb.answer("Отклонено")
 
 
+# =========================
+# MORE
+# =========================
 @router.callback_query(F.data.startswith("adm_more:"))
 async def admin_cb_more(cb: CallbackQuery) -> None:
     if not is_admin(cb.from_user.id):

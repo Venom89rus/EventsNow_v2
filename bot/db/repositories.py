@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
-from typing import Any, Optional, Sequence
+from typing import Any, Optional
 
 from bot.db.database import get_db
 
@@ -15,60 +14,75 @@ class Event:
     title: str
     description: str
     event_format: str
-    start_date: str
-    end_date: str
-    start_time: str
-    end_time: str
+
+    event_date: str | None
+    event_time: str | None
+
+    start_date: str | None
+    end_date: str | None
+    open_time: str | None
+    close_time: str | None
+
+    sessions_start_date: str | None
+    sessions_end_date: str | None
+    sessions_times: str | None
+
     location: str
     price_text: str
     ticket_link: str
     phone: str
-    photo_ids: list[str]
+
     status: str
+    created_at: str
+
+
+def _col(row: Any, name: str, default: Any = None) -> Any:
+    try:
+        return row[name]
+    except Exception:
+        return default
 
 
 def _row_to_event(row: Any) -> Event:
-    # Row в sqlite/aiosqlite: нет .get(), только ["col"] и keys()
-    def col(name: str, default: Any = "") -> Any:
-        try:
-            if hasattr(row, "keys") and name in row.keys():
-                v = row[name]
-                return default if v is None else v
-        except Exception:
-            pass
-        return default
-
-    raw = col("photo_ids", "[]")
-    try:
-        photos = json.loads(raw) if raw else []
-        if not isinstance(photos, list):
-            photos = []
-    except Exception:
-        photos = []
-
     return Event(
-        id=int(col("id", 0)),
-        organizer_id=int(col("organizer_id", 0)),
-        category=str(col("category", "")),
-        title=str(col("title", "")),
-        description=str(col("description", "")),
-        event_format=str(col("event_format", "single")),
-        start_date=str(col("start_date", "")),
-        end_date=str(col("end_date", "")),
-        start_time=str(col("start_time", "")),
-        end_time=str(col("end_time", "")),
-        location=str(col("location", "")),
-        price_text=str(col("price_text", "")),
-        ticket_link=str(col("ticket_link", "")),
-        phone=str(col("phone", "")),
-        photo_ids=photos,
-        status=str(col("status", "pending")),
+        id=int(_col(row, "id", 0)),
+        organizer_id=int(_col(row, "organizer_id", 0)),
+        category=str(_col(row, "category", "") or ""),
+        title=str(_col(row, "title", "") or ""),
+        description=str(_col(row, "description", "") or ""),
+        event_format=str(_col(row, "event_format", "single") or "single"),
+
+        event_date=_col(row, "event_date"),
+        event_time=_col(row, "event_time"),
+
+        start_date=_col(row, "start_date"),
+        end_date=_col(row, "end_date"),
+        open_time=_col(row, "open_time"),
+        close_time=_col(row, "close_time"),
+
+        sessions_start_date=_col(row, "sessions_start_date"),
+        sessions_end_date=_col(row, "sessions_end_date"),
+        sessions_times=_col(row, "sessions_times"),
+
+        location=str(_col(row, "location", "") or ""),
+        price_text=str(_col(row, "price_text", "") or ""),
+        ticket_link=str(_col(row, "ticket_link", "") or ""),
+        phone=str(_col(row, "phone", "") or ""),
+
+        status=str(_col(row, "status", "pending") or "pending"),
+        created_at=str(_col(row, "created_at", "") or ""),
     )
 
 
-async def ensure_user(user_id: int) -> None:
+# =========================
+# базовые функции (как у тебя логически было)
+# =========================
+async def ensure_user(user_id: int, role: str = "organizer") -> None:
     db = get_db()
-    await db.execute("INSERT OR IGNORE INTO users(user_id) VALUES (?);", (int(user_id),))
+    await db.execute(
+        "INSERT OR IGNORE INTO users (user_id, role) VALUES (?, ?)",
+        (user_id, role),
+    )
     await db.commit()
 
 
@@ -78,107 +92,178 @@ async def create_event(
     category: str,
     title: str,
     description: str,
-    event_format: str,
-    start_date: str,
-    end_date: str,
-    start_time: str,
-    end_time: str,
-    location: str,
-    price_text: str,
-    ticket_link: str,
-    phone: str,
-    photo_ids: Sequence[str] | None = None,
+    event_format: str,  # single|period|sessions
+
+    # single
+    event_date: str | None = None,
+    event_time: str | None = None,
+
+    # period
+    start_date: str | None = None,
+    end_date: str | None = None,
+    open_time: str | None = None,
+    close_time: str | None = None,
+
+    # sessions
+    sessions_start_date: str | None = None,
+    sessions_end_date: str | None = None,
+    sessions_times: str | None = None,
+
+    location: str = "",
+    price_text: str = "",
+    ticket_link: str = "",
+    phone: str = "",
     status: str = "pending",
+    photo_ids: list[str] | None = None,
 ) -> int:
     db = get_db()
-    photo_json = json.dumps(list(photo_ids or []), ensure_ascii=False)
 
     cur = await db.execute(
         """
-        INSERT INTO events(
+        INSERT INTO events (
             organizer_id, category, title, description, event_format,
-            start_date, end_date, start_time, end_time,
+            event_date, event_time,
+            start_date, end_date, open_time, close_time,
+            sessions_start_date, sessions_end_date, sessions_times,
             location, price_text, ticket_link, phone,
-            photo_ids, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            status
+        ) VALUES (
+            ?, ?, ?, ?, ?,
+            ?, ?,
+            ?, ?, ?, ?,
+            ?, ?, ?,
+            ?, ?, ?, ?,
+            ?
+        )
         """,
         (
-            int(organizer_id),
-            category,
-            title,
-            description,
-            event_format,
-            start_date,
-            end_date,
-            start_time,
-            end_time,
-            location,
-            price_text,
-            ticket_link,
-            phone,
-            photo_json,
-            status,
+            organizer_id, category, title, description, event_format,
+            event_date, event_time,
+            start_date, end_date, open_time, close_time,
+            sessions_start_date, sessions_end_date, sessions_times,
+            location, price_text, ticket_link, phone,
+            status
         ),
     )
     await db.commit()
-    return int(cur.lastrowid)
+
+    event_id = int(cur.lastrowid)
+
+    # фото
+    if photo_ids:
+        for idx, file_id in enumerate(photo_ids[:5], start=1):
+            await db.execute(
+                "INSERT INTO event_photos (event_id, file_id, position) VALUES (?, ?, ?)",
+                (event_id, file_id, idx),
+            )
+        await db.commit()
+
+    return event_id
 
 
 async def get_event(event_id: int) -> Optional[Event]:
     db = get_db()
-    cur = await db.execute("SELECT * FROM events WHERE id = ?;", (int(event_id),))
+    cur = await db.execute("SELECT * FROM events WHERE id = ?", (event_id,))
     row = await cur.fetchone()
     return _row_to_event(row) if row else None
+
+
+async def get_event_photos(event_id: int) -> list[str]:
+    db = get_db()
+    cur = await db.execute(
+        "SELECT file_id FROM event_photos WHERE event_id = ? ORDER BY position ASC",
+        (event_id,),
+    )
+    rows = await cur.fetchall()
+    return [str(r["file_id"]) for r in rows]
 
 
 async def get_pending_events(limit: int = 30) -> list[Event]:
     db = get_db()
     cur = await db.execute(
-        "SELECT * FROM events WHERE status='pending' ORDER BY id ASC LIMIT ?;",
-        (int(limit),),
+        "SELECT * FROM events WHERE status = 'pending' ORDER BY created_at ASC, id ASC LIMIT ?",
+        (limit,),
     )
     rows = await cur.fetchall()
     return [_row_to_event(r) for r in rows]
 
 
-async def approve_event(event_id: int, admin_id: int) -> bool:
+async def set_event_status(event_id: int, status: str) -> bool:
     db = get_db()
     cur = await db.execute(
-        "UPDATE events SET status='approved', approved_by=? WHERE id=? AND status='pending';",
-        (int(admin_id), int(event_id)),
+        "UPDATE events SET status = ? WHERE id = ?",
+        (status, event_id),
     )
     await db.commit()
     return cur.rowcount > 0
 
 
-async def reject_event(event_id: int, admin_id: int) -> bool:
+# =========================
+# Этап 4: организаторское "поднять"
+# (минимально — обновляем created_at, чтобы в сортировках "по свежести" поднялось)
+# =========================
+async def get_organizer_events(organizer_id: int, limit: int = 10, status: str = "approved") -> list[Event]:
     db = get_db()
     cur = await db.execute(
-        "UPDATE events SET status='rejected', rejected_by=? WHERE id=? AND status='pending';",
-        (int(admin_id), int(event_id)),
+        "SELECT * FROM events WHERE organizer_id = ? AND status = ? ORDER BY created_at DESC, id DESC LIMIT ?",
+        (organizer_id, status, limit),
+    )
+    rows = await cur.fetchall()
+    return [_row_to_event(r) for r in rows]
+
+
+async def bump_event(event_id: int, organizer_id: int) -> tuple[bool, str]:
+    """
+    Возвращает (ok, reason). ok=True если подняли.
+    Поднимать можно только СВОЁ и только approved.
+    """
+    ev = await get_event(event_id)
+    if not ev:
+        return False, "Событие не найдено"
+    if int(ev.organizer_id) != int(organizer_id):
+        return False, "Это не твоё событие"
+    if ev.status != "approved":
+        return False, "Поднимать можно только одобренные события"
+
+    db = get_db()
+    cur = await db.execute(
+        "UPDATE events SET created_at = datetime('now') WHERE id = ?",
+        (event_id,),
     )
     await db.commit()
-    return cur.rowcount > 0
+    return (cur.rowcount > 0), ("OK" if cur.rowcount > 0 else "Не удалось обновить")
 
 
+# =========================
+# Удобный объект-адаптер (чтобы в хендлерах было repo.xxx)
+# =========================
 class Repo:
-    async def ensure_user(self, user_id: int) -> None:
-        return await ensure_user(user_id)
+    async def ensure_user(self, user_id: int, role: str = "organizer") -> None:
+        await ensure_user(user_id, role=role)
 
-    async def create_event(self, **kwargs: Any) -> int:
+    async def create_event(self, **kwargs) -> int:
         return await create_event(**kwargs)
 
     async def get_event(self, event_id: int) -> Optional[Event]:
         return await get_event(event_id)
 
+    async def get_event_photos(self, event_id: int) -> list[str]:
+        return await get_event_photos(event_id)
+
     async def get_pending_events(self, limit: int = 30) -> list[Event]:
         return await get_pending_events(limit=limit)
 
-    async def approve_event(self, event_id: int, admin_id: int) -> bool:
-        return await approve_event(event_id, admin_id)
+    async def approve_event(self, event_id: int, admin_id: int | None = None) -> bool:
+        return await set_event_status(event_id, "approved")
 
-    async def reject_event(self, event_id: int, admin_id: int) -> bool:
-        return await reject_event(event_id, admin_id)
+    async def reject_event(self, event_id: int, admin_id: int | None = None) -> bool:
+        return await set_event_status(event_id, "rejected")
+
+    async def get_organizer_events(self, organizer_id: int, limit: int = 10, status: str = "approved") -> list[Event]:
+        return await get_organizer_events(organizer_id, limit=limit, status=status)
+
+    async def bump_event(self, event_id: int, organizer_id: int) -> tuple[bool, str]:
+        return await bump_event(event_id, organizer_id)
 
 
 repo = Repo()
