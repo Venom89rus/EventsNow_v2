@@ -20,6 +20,12 @@ ADMIN_IDS = [int(x) for x in _admin_ids_raw.split(",") if x.strip().isdigit()]
 YOOKASSA_SHOP_ID = os.getenv("YOOKASSA_SHOP_ID", "").strip()
 YOOKASSA_SECRET_KEY = os.getenv("YOOKASSA_SECRET_KEY", "").strip()
 
+YOOKASSA_RETURN_URL = os.getenv(
+    "YOOKASSA_RETURN_URL",
+    "https://t.me/Events_Now_bot"
+)
+
+
 if not YOOKASSA_SHOP_ID:
     raise RuntimeError("YOOKASSA_SHOP_ID is missing in .env")
 

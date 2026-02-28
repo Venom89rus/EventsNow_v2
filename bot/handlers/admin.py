@@ -16,6 +16,8 @@ from aiogram.enums import ParseMode
 
 from bot.db.repositories import repo
 
+from typing import Any, Optional
+
 
 router = Router()
 
@@ -50,6 +52,7 @@ def admin_menu_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="⏳ На модерации")],
+            [KeyboardButton(text="🗑 Удалить событие")],
             [KeyboardButton(text="⬅️ Назад в меню")],
         ],
         resize_keyboard=True,
@@ -115,30 +118,38 @@ def short_desc(text: str, limit: int = 100) -> tuple[str, bool]:
         return s, False
     return s[:limit].rstrip() + "…", True
 
+# --- ДОБАВЬ где-нибудь рядом с _safe()/short_desc(), например перед build_admin_caption ---
+
+
+def _ev(event: Any, key: str, default=None):
+    """Безопасно достаёт поле из dict или объекта."""
+    if isinstance(event, dict):
+        return event.get(key, default)
+    return getattr(event, key, default)
 
 def build_admin_caption(event: Any) -> tuple[str, bool]:
-    eid = int(getattr(event, "id"))
-    cat = _safe(getattr(event, "category", None))
-    title = _safe(getattr(event, "title", None))
-    location = _safe(getattr(event, "location", None))
-    price = _safe(getattr(event, "price_text", None))
-    ticket_link = _safe(getattr(event, "ticket_link", None))
-    phone = _safe(getattr(event, "phone", None))
-    organizer_id = _safe(getattr(event, "organizer_id", None))
-    fmt = _safe(getattr(event, "event_format", None), "single")
+    eid = int(_ev(event, "id"))
+    cat = _safe(_ev(event, "category"))
+    title = _safe(_ev(event, "title"))
+    location = _safe(_ev(event, "location"))
+    price = _safe(_ev(event, "price_text"))
+    ticket_link = _safe(_ev(event, "ticket_link"))
+    phone = _safe(_ev(event, "phone"))
+    organizer_id = _safe(_ev(event, "organizer_id"))
+    fmt = _safe(_ev(event, "event_format"), "single")
 
     # даты/время по формату
     if fmt == "period":
-        date_text = f"{_safe(getattr(event, 'start_date', None))} — {_safe(getattr(event, 'end_date', None))}"
-        time_text = f"{_safe(getattr(event, 'open_time', None))} — {_safe(getattr(event, 'close_time', None))}"
+        date_text = f"{_safe(_ev(event, 'start_date'))} — {_safe(_ev(event, 'end_date'))}"
+        time_text = f"{_safe(_ev(event, 'open_time'))} — {_safe(_ev(event, 'close_time'))}"
     elif fmt == "sessions":
-        date_text = f"{_safe(getattr(event, 'sessions_start_date', None))} — {_safe(getattr(event, 'sessions_end_date', None))}"
-        time_text = _safe(getattr(event, "sessions_times", None))
+        date_text = f"{_safe(_ev(event, 'sessions_start_date'))} — {_safe(_ev(event, 'sessions_end_date'))}"
+        time_text = _safe(_ev(event, "sessions_times"))
     else:
-        date_text = _safe(getattr(event, "event_date", None))
-        time_text = _safe(getattr(event, "event_time", None))
+        date_text = _safe(_ev(event, "event_date"))
+        time_text = _safe(_ev(event, "event_time"))
 
-    desc_full = _safe(getattr(event, "description", None), "")
+    desc_full = _safe(_ev(event, "description"), "")
     desc_short, cut = short_desc(desc_full, 100)
 
     caption = "\n".join([
@@ -160,10 +171,9 @@ def build_admin_caption(event: Any) -> tuple[str, bool]:
     ])
     return caption, cut
 
-
 async def _get_next_pending_id(current_id: int) -> Optional[int]:
     pending = await repo.get_pending_events(limit=50)
-    ids = [int(e.id) for e in pending]
+    ids = [int(_ev(e, "id")) for e in pending]
     if not ids:
         return None
     if current_id not in ids:
@@ -171,10 +181,14 @@ async def _get_next_pending_id(current_id: int) -> Optional[int]:
     i = ids.index(current_id)
     return ids[i + 1] if i + 1 < len(ids) else None
 
-
-async def send_event_for_moderation(target: Message | CallbackQuery, event: Any, next_id: Optional[int]) -> None:
+async def send_event_for_moderation(
+    target: Message | CallbackQuery,
+    event: Any,
+    next_id: Optional[int],
+) -> None:
     caption, cut = build_admin_caption(event)
-    eid = int(getattr(event, "id"))
+    eid = int(_ev(event, "id"))
+
     photos = await repo.get_event_photos(eid)
     photo_id = photos[0] if photos else None
 

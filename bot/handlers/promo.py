@@ -26,6 +26,21 @@ from bot.services.yookassa_client import create_payment
 
 router = Router()
 
+def get_promo_prices() -> dict[str, int]:
+
+    def _int_env(name: str, default: int) -> int:
+        try:
+            return int((os.getenv(name, str(default)) or str(default)).strip())
+        except Exception:
+            return default
+
+    return {
+        "top": _int_env("PROMO_PRICE_TOP", 299),
+        "notify": _int_env("PROMO_PRICE_NOTIFY", 199),
+        "highlight": _int_env("PROMO_PRICE_HIGHLIGHT", 149),
+        "bump": _int_env("PROMO_PRICE_BUMP", 99),
+    }
+
 def _get_yookassa_credentials() -> tuple[str, str, str]:
     """
     PAYMENT_MODE=0 -> тестовый магазин
@@ -239,7 +254,6 @@ def organizer_menu_kb() -> ReplyKeyboardMarkup:
         resize_keyboard=True,
     )
 
-
 def promo_menu_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -249,19 +263,17 @@ def promo_menu_kb() -> ReplyKeyboardMarkup:
         resize_keyboard=True,
     )
 
-
 def services_kb(event_id: int) -> InlineKeyboardMarkup:
-    # цены пока фикс — потом привяжем к Юкассе
+    prices = get_promo_prices()
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="⭐ Топ на 24ч — 299₽", callback_data=f"promo_srv:top:{event_id}")],
-            [InlineKeyboardButton(text="📣 Оповещение всем — 199₽", callback_data=f"promo_srv:notify:{event_id}")],
-            [InlineKeyboardButton(text="✨ Подсветка — 149₽", callback_data=f"promo_srv:highlight:{event_id}")],
-            [InlineKeyboardButton(text="⬆️ Поднять (bump) — 99₽", callback_data=f"promo_srv:bump:{event_id}")],
+            [InlineKeyboardButton(text=f"⭐ Топ на 24ч — {prices['top']}₽", callback_data=f"promo_srv:top:{event_id}")],
+            [InlineKeyboardButton(text=f"📣 Оповещение всем — {prices['notify']}₽", callback_data=f"promo_srv:notify:{event_id}")],
+            [InlineKeyboardButton(text=f"✨ Подсветка — {prices['highlight']}₽", callback_data=f"promo_srv:highlight:{event_id}")],
+            [InlineKeyboardButton(text=f"⬆️ Поднять (bump) — {prices['bump']}₽", callback_data=f"promo_srv:bump:{event_id}")],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="promo_back")],
         ]
     )
-
 
 def pay_kb(order_id: int) -> InlineKeyboardMarkup:
     # Заглушка оплаты: “✅ Я оплатил”
@@ -295,11 +307,9 @@ def pick_events_kb(events) -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="promo_back")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-
 # ===== FSM =====
 class PromoFSM(StatesGroup):
     wait_event_id = State()
-
 
 # ===== handlers =====\
 
@@ -394,11 +404,11 @@ async def promo_cb_service(cb: CallbackQuery, state: FSMContext, repo: repo) -> 
         return
 
     # цены (оставь как у тебя; пример)
-    prices = {"top": 299, "notify": 199, "highlight": 149, "bump": 99}
-    amount_rub = int(prices.get(service, 0))
-    if amount_rub <= 0:
-        await cb.answer("Неизвестная услуга", show_alert=True)
+    prices = get_promo_prices()
+    if service not in prices:
+        await cb.answer("Неизвестная услуга.", show_alert=True)
         return
+    amount_rub = int(prices[service])
 
     # 1) создаём заказ в БД
     order_id = await repo.create_promo_order(
@@ -562,7 +572,8 @@ async def promo_cb_service(cb: CallbackQuery, repo: "Repo" = None) -> None:
         return
     event_id = int(event_id_str)
 
-    prices = {"top": 99, "highlight": 199, "bump": 99, "notify": 499}
+    # ✅ ЕДИНЫЙ источник цен — из .env
+    prices = get_promo_prices()
     if service not in prices:
         await cb.answer("Неизвестная услуга.", show_alert=True)
         return
@@ -609,6 +620,7 @@ async def promo_cb_service(cb: CallbackQuery, repo: "Repo" = None) -> None:
         reply_markup=promo_paid_kb(order_id, pay_url),
     )
     await cb.answer()
+
 @router.callback_query()
 async def _debug_any_callback(cb: CallbackQuery):
     logger.warning("UNHANDLED CALLBACK: data=%r", cb.data)
