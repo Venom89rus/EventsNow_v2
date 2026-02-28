@@ -1,5 +1,10 @@
 # bot/handlers/resident.py
+
+
 from __future__ import annotations
+
+import json
+import sqlite3
 
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -15,6 +20,7 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
 )
+
 
 from bot.db.database import get_db
 
@@ -125,14 +131,48 @@ def _is_top_recommended(e: EventCard) -> bool:
     return k in {"top", "топ", "recommended", "recommend", "рекомендуем"} or int(e.highlighted or 0) == 1
 
 
+_DB_PATH_PRINTED = False
+
 async def _get_first_photo_file_id(event_id: int) -> str | None:
+    global _DB_PATH_PRINTED
     db = get_db()
+
+    # 1) Печатаем путь к SQLite один раз за запуск
+    if not _DB_PATH_PRINTED:
+        try:
+            cur0 = await db.execute("PRAGMA database_list;")
+            rows0 = await cur0.fetchall()
+            print("DEBUG DB PATH:", rows0[0][2] if rows0 else None)
+        except Exception as ex:
+            print("WARN: cannot read PRAGMA database_list:", ex)
+        _DB_PATH_PRINTED = True
+
+    # 2) Достаём фото из event_photos
     cur = await db.execute(
-        "SELECT file_id FROM event_photos WHERE event_id = ? ORDER BY position ASC, id ASC LIMIT 1",
+        """
+        SELECT file_id
+        FROM event_photos
+        WHERE event_id = ?
+        ORDER BY position ASC, id ASC
+        LIMIT 1
+        """,
         (event_id,),
     )
     row = await cur.fetchone()
-    return row["file_id"] if row else None
+
+    if not row:
+        print(f"DEBUG PHOTO: event_id={event_id} -> NONE (no rows in event_photos)")
+        return None
+
+    try:
+        file_id = row["file_id"]
+    except Exception:
+        file_id = row[0]
+
+    file_id = str(file_id).strip() if file_id else ""
+    print(f"DEBUG PHOTO: event_id={event_id} -> {file_id[:12]}... len={len(file_id)}")
+
+    return file_id or None
 
 
 async def _fetch_paid_events(
@@ -241,8 +281,8 @@ async def _fetch_paid_events(
         END,
         COALESCE(highlighted,0) DESC,
         COALESCE(bumped_at,'') DESC,
-        date({norm_start}) ASC,
-        COALESCE(event_time,'') ASC,
+        date({norm_start}) DESC,
+        COALESCE(event_time,'') DESC,
         id DESC
     """
 
@@ -336,7 +376,6 @@ def _ticket_kb(e: EventCard) -> InlineKeyboardMarkup | None:
         inline_keyboard=[[InlineKeyboardButton(text="🎟 Купить билет", url=link)]]
     )
 
-
 async def _send_feed(message: Message, events: list[EventCard]) -> None:
     if not events:
         await message.answer(
@@ -357,21 +396,27 @@ async def _send_feed(message: Message, events: list[EventCard]) -> None:
         text = _format_card_text(e)
         ikb = _ticket_kb(e)
 
-        try:
-            if photo_id:
-                await message.answer_photo(photo=photo_id, caption=text, reply_markup=ikb)
-            else:
-                await message.answer(text, reply_markup=ikb)
-        except Exception as ex:
-            # Фолбэк: без клавиатуры/кнопок
+        # 1) Если фото есть — пробуем отправить карточку с фото
+        if photo_id:
             try:
-                if photo_id:
-                    await message.answer_photo(photo=photo_id, caption=text)
-                else:
-                    await message.answer(text)
-            except Exception:
-                print("WARN: failed to send event card", e.id, ex)
+                await message.answer_photo(
+                    photo=photo_id,
+                    caption=text,
+                    reply_markup=ikb,
+                    parse_mode="HTML",
+                )
+                continue
+            except Exception as ex:
+                # Важно: покажем первичную причину, иначе не понять почему фото не ушло
+                print(f"WARN: failed to send photo for event_id={e.id}, photo_id={photo_id!r}: {ex}")
 
+        # 2) Фолбэк: отправляем без фото (но с кнопкой если она валидна)
+        try:
+            await message.answer(text, reply_markup=ikb, parse_mode="HTML")
+        except Exception as ex:
+            # 3) Последний фолбэк: вообще без клавиатуры (на случай проблем с URL)
+            print(f"WARN: failed to send text card with kb for event_id={e.id}: {ex}")
+            await message.answer(text, parse_mode="HTML")
 
 @router.message(F.text == "🏠 Житель")
 async def resident_entry(message: Message, state: FSMContext) -> None:

@@ -195,7 +195,6 @@ async def create_event(
 
     payload_photos = json.dumps(list(photo_ids or []), ensure_ascii=False)
 
-    # единая вставка под разные версии схемы
     fields: list[str] = []
     values: list[Any] = []
 
@@ -226,7 +225,10 @@ async def create_event(
     add("price_text", str(price_text))
     add("ticket_link", str(ticket_link))
     add("phone", str(phone))
+
+    # если в events есть photo_ids — пишем туда (старый вариант схемы)
     add("photo_ids", payload_photos)
+
     add("status", str(status))
 
     if not fields:
@@ -236,9 +238,38 @@ async def create_event(
     sql = f"INSERT INTO events ({','.join(fields)}) VALUES ({placeholders})"
 
     cur = await db.execute(sql, tuple(values))
-    await db.commit()
-    return int(cur.lastrowid)
+    event_id = int(cur.lastrowid)
 
+    # ✅ НОВОЕ: если колонки photo_ids в events НЕТ — сохраняем фото в event_photos
+    if "photo_ids" not in ecols and photo_ids:
+        try:
+            pcols = await _table_info("event_photos")
+        except Exception:
+            pcols = set()
+
+        # таблица существует и есть нужные колонки
+        if pcols and ("event_id" in pcols) and ("file_id" in pcols):
+            # подчистим старые на всякий случай (если вдруг переиспользование)
+            await db.execute("DELETE FROM event_photos WHERE event_id = ?", (event_id,))
+            pos = 1
+            for fid in list(photo_ids):
+                if not fid:
+                    continue
+                # position может отсутствовать в старой схеме — проверим
+                if "position" in pcols:
+                    await db.execute(
+                        "INSERT INTO event_photos (event_id, file_id, position) VALUES (?, ?, ?)",
+                        (event_id, str(fid), pos),
+                    )
+                else:
+                    await db.execute(
+                        "INSERT INTO event_photos (event_id, file_id) VALUES (?, ?)",
+                        (event_id, str(fid)),
+                    )
+                pos += 1
+
+    await db.commit()
+    return event_id
 
 async def get_event(event_id: int) -> Optional[Event]:
     db = get_db()
@@ -249,8 +280,24 @@ async def get_event(event_id: int) -> Optional[Event]:
 
 async def get_event_photos(event_id: int) -> list[str]:
     ev = await get_event(event_id)
-    return ev.photo_ids if ev else []
+    if not ev:
+        return []
 
+    # если в объекте уже есть photo_ids (старая схема) — используем
+    if getattr(ev, "photo_ids", None):
+        return list(ev.photo_ids or [])
+
+    # иначе читаем из event_photos (твоя текущая схема)
+    db = get_db()
+    try:
+        cur = await db.execute(
+            "SELECT file_id FROM event_photos WHERE event_id = ? ORDER BY position ASC, id ASC",
+            (int(event_id),),
+        )
+        rows = await cur.fetchall()
+        return [r["file_id"] if isinstance(r, dict) else r[0] for r in rows]
+    except Exception:
+        return []
 
 async def get_pending_events(limit: int = 30) -> list[Event]:
     db = get_db()
@@ -480,29 +527,101 @@ class Repo:
 
     async def create_event(self, **kwargs) -> int:
         """
-        Создаёт событие. Принимает kwargs, потому что хендлеры передают много полей,
-        включая event_date/event_time и т.п.
+        Создаёт событие.
 
-        Функция сама:
-        - отфильтрует kwargs по реально существующим колонкам таблицы events
-        - сделает INSERT
-        - вернёт id созданного события
+        Важно: афиши хранятся в таблице event_photos (а не в events.photo_ids, которого может не быть).
+        Поэтому если хендлер передал photo_ids (или photos) — создаём событие через core create_event(...),
+        который поддерживает обе схемы (events.photo_ids / event_photos).
+
+        Для обратной совместимости оставляем fallback на INSERT только по колонкам events.
         """
+
+        # --- 1) Нормальный путь: создание с поддержкой афиш ---
+        photo_ids = kwargs.get("photo_ids")
+        if photo_ids is None:
+            photo_ids = kwargs.get("photos")
+
+        looks_like_full_event = all(
+            k in kwargs and kwargs.get(k) not in (None, "")
+            for k in ("organizer_id", "category", "title", "description")
+        )
+
+        if looks_like_full_event:
+            organizer_id = int(kwargs.get("organizer_id"))
+            category = str(kwargs.get("category") or "")
+            title = str(kwargs.get("title") or "")
+            description = str(kwargs.get("description") or "")
+            event_format = str(kwargs.get("event_format") or kwargs.get("format") or "")
+
+            start_date = (
+                    kwargs.get("start_date")
+                    or kwargs.get("date_from")
+                    or kwargs.get("event_date")
+                    or ""
+            )
+            end_date = (
+                    kwargs.get("end_date")
+                    or kwargs.get("date_to")
+                    or kwargs.get("event_date")
+                    or ""
+            )
+            start_time = (
+                    kwargs.get("start_time")
+                    or kwargs.get("time_from")
+                    or kwargs.get("event_time")
+                    or ""
+            )
+            end_time = (
+                    kwargs.get("end_time")
+                    or kwargs.get("time_to")
+                    or kwargs.get("event_time")
+                    or ""
+            )
+
+            location = str(kwargs.get("location") or "")
+            price_text = str(kwargs.get("price_text") or kwargs.get("price") or "")
+            ticket_link = str(kwargs.get("ticket_link") or kwargs.get("link") or "")
+            phone = str(kwargs.get("phone") or "")
+            status = str(kwargs.get("status") or "pending")
+
+            # нормализуем список фото
+            if photo_ids is None:
+                photo_ids_list = []
+            elif isinstance(photo_ids, (list, tuple)):
+                photo_ids_list = [str(x) for x in photo_ids if x]
+            else:
+                photo_ids_list = [str(photo_ids)] if str(photo_ids).strip() else []
+
+            return await create_event(
+                organizer_id=organizer_id,
+                category=category,
+                title=title,
+                description=description,
+                event_format=event_format,
+                start_date=str(start_date),
+                end_date=str(end_date),
+                start_time=str(start_time),
+                end_time=str(end_time),
+                location=location,
+                price_text=price_text,
+                ticket_link=ticket_link,
+                phone=phone,
+                photo_ids=photo_ids_list,
+                status=status,
+            )
+
+        # --- 2) Fallback: старое поведение (если кто-то создаёт событие "кусочками") ---
         db = get_db()
 
-        # получаем реальные колонки events (чтобы не падать от лишних kwargs)
         cur = await db.execute("PRAGMA table_info(events)")
         rows = await cur.fetchall()
         cols = {r["name"] for r in rows}
 
-        # обязательное поле
         if "organizer_id" not in kwargs:
             raise ValueError("create_event: missing required field 'organizer_id'")
 
-        # оставляем только те поля, которые реально есть в таблице
         data = {k: v for k, v in kwargs.items() if k in cols}
 
-        # если по какой-то причине event_date отсутствует в БД, но пришёл — попробуем смэпить на start_date
         if "event_date" in kwargs and "event_date" not in cols and "start_date" in cols and "start_date" not in data:
             data["start_date"] = kwargs["event_date"]
 
