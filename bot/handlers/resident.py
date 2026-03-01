@@ -1,10 +1,7 @@
 # bot/handlers/resident.py
 
-
 from __future__ import annotations
 
-import json
-import sqlite3
 import html
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -15,18 +12,20 @@ from aiogram.fsm.context import FSMContext
 from aiogram.filters import StateFilter
 from aiogram.types import (
     Message,
+    CallbackQuery,
     ReplyKeyboardMarkup,
     KeyboardButton,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
 )
-
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from bot.db.database import get_db
 
 router = Router()
 
 FEED_LIMIT = 10
+PREVIEW_LEN = 100
 
 # Категории жителя (как договаривались) + ТОП/Рекомендуем отдельным фильтром
 RESIDENT_CATEGORIES = ["концерт", "спектакль", "мастер-класс", "выставка", "лекция", "другое"]
@@ -45,7 +44,6 @@ class ResidentBrowse(StatesGroup):
 
 
 def resident_menu_kb() -> ReplyKeyboardMarkup:
-    # МЕНЮ СНИЗУ (ReplyKeyboardMarkup)
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="🔄 Обновить")],
@@ -84,17 +82,13 @@ def categories_kb() -> ReplyKeyboardMarkup:
         return s[:1].upper() + s[1:] if s else s
 
     rows = []
-    cats = RESIDENT_CATEGORIES[:]  # ["концерт", "спектакль", ...]
+    cats = RESIDENT_CATEGORIES[:]
     for i in range(0, len(cats), 2):
         c1 = cats[i]
-        b1 = KeyboardButton(text=f"{ICONS.get(c1, '🎭')} {pretty_name(c1)}")
-        row = [b1]
-
+        row = [KeyboardButton(text=f"{ICONS.get(c1, '🎭')} {pretty_name(c1)}")]
         if i + 1 < len(cats):
             c2 = cats[i + 1]
-            b2 = KeyboardButton(text=f"{ICONS.get(c2, '🎭')} {pretty_name(c2)}")
-            row.append(b2)
-
+            row.append(KeyboardButton(text=f"{ICONS.get(c2, '🎭')} {pretty_name(c2)}"))
         rows.append(row)
 
     rows.append([KeyboardButton(text="⬅️ Назад")])
@@ -118,31 +112,8 @@ class EventCard:
     highlighted: int
 
 
-def _today_iso() -> str:
-    return date.today().isoformat()
-
-
-def _parse_iso_date(s: str | None) -> date | None:
-    if not s:
-        return None
-    try:
-        return datetime.strptime(s, "%Y-%m-%d").date()
-    except Exception:
-        return None
-
-
 def _event_best_date(e: EventCard) -> str | None:
-    # приоритет: start_date -> event_date
     return e.start_date or e.event_date
-
-
-def _is_paid_or_promoted(e: EventCard) -> bool:
-    # “платность/продвижение” считаем по колонкам продвижения
-    if (e.promoted_kind or "").strip():
-        return True
-    if int(e.highlighted or 0) == 1:
-        return True
-    return False
 
 
 def _is_top_recommended(e: EventCard) -> bool:
@@ -152,11 +123,11 @@ def _is_top_recommended(e: EventCard) -> bool:
 
 _DB_PATH_PRINTED = False
 
+
 async def _get_first_photo_file_id(event_id: int) -> str | None:
     global _DB_PATH_PRINTED
     db = get_db()
 
-    # 1) Печатаем путь к SQLite один раз за запуск
     if not _DB_PATH_PRINTED:
         try:
             cur0 = await db.execute("PRAGMA database_list;")
@@ -166,7 +137,6 @@ async def _get_first_photo_file_id(event_id: int) -> str | None:
             print("WARN: cannot read PRAGMA database_list:", ex)
         _DB_PATH_PRINTED = True
 
-    # 2) Достаём фото из event_photos
     cur = await db.execute(
         """
         SELECT file_id
@@ -190,8 +160,52 @@ async def _get_first_photo_file_id(event_id: int) -> str | None:
 
     file_id = str(file_id).strip() if file_id else ""
     print(f"DEBUG PHOTO: event_id={event_id} -> {file_id[:12]}... len={len(file_id)}")
-
     return file_id or None
+
+
+async def _fetch_event_by_id(event_id: int) -> EventCard | None:
+    db = get_db()
+    cur = await db.execute(
+        """
+        SELECT
+            id,
+            title,
+            category,
+            category_text,
+            COALESCE(description, '') AS description,
+            start_date,
+            event_date,
+            event_time,
+            location,
+            price_text,
+            ticket_link,
+            promoted_kind,
+            highlighted
+        FROM events
+        WHERE id = ?
+        LIMIT 1
+        """,
+        (event_id,),
+    )
+    r = await cur.fetchone()
+    if not r:
+        return None
+
+    return EventCard(
+        id=int(r["id"]),
+        title=str(r["title"] or ""),
+        category=str(r["category"] or ""),
+        category_text=str(r["category_text"] or ""),
+        description=str(r["description"] or ""),
+        start_date=r["start_date"],
+        event_date=r["event_date"],
+        event_time=r["event_time"],
+        location=str(r["location"] or ""),
+        price_text=str(r["price_text"] or ""),
+        ticket_link=str(r["ticket_link"] or ""),
+        promoted_kind=str(r["promoted_kind"] or ""),
+        highlighted=int(r["highlighted"] or 0),
+    )
 
 
 async def _fetch_paid_events(
@@ -200,7 +214,6 @@ async def _fetch_paid_events(
     category: str | None = None,
     only_top: bool = False,
 ) -> list[EventCard]:
-
     db = get_db()
 
     now_dt = datetime.now()
@@ -214,7 +227,7 @@ async def _fetch_paid_events(
     where = ["status = 'approved'"]
     params: list[object] = []
 
-    # ВАЖНО: пустые строки считаем как NULL, иначе COALESCE возьмёт '' и date('') станет NULL.
+    # пустые строки считаем как NULL
     def _nn(col: str) -> str:
         return f"NULLIF(trim({col}), '')"
 
@@ -234,9 +247,8 @@ async def _fetch_paid_events(
     norm_start = norm_date_expr(best_start)
     norm_end = norm_date_expr(best_end)
 
-    # Если даты вообще нет (NULL) — такое событие не показываем в ленте
+    # Если даты вообще нет — такое событие не показываем в ленте
     where.append(f"COALESCE(trim({best_start}), '') <> ''")
-
 
     where.append(
         f"""(
@@ -246,10 +258,10 @@ async def _fetch_paid_events(
                 AND (
                     COALESCE(trim(event_time),'') = ''
                     OR time(
-                    CASE
-                        WHEN length(trim(event_time)) = 5 THEN trim(event_time) || ':00'
-                        ELSE trim(event_time)
-                    END
+                        CASE
+                            WHEN length(trim(event_time)) = 5 THEN trim(event_time) || ':00'
+                            ELSE trim(event_time)
+                        END
                     ) >= time(?)
                 )
             )
@@ -257,7 +269,6 @@ async def _fetch_paid_events(
     )
     params.extend([today.isoformat(), today.isoformat(), now_time])
 
-    # Ограничение "до N дней" (по дате старта)
     if date_to is not None:
         where.append(f"date({norm_start}) <= date(?)")
         params.append(date_to.isoformat())
@@ -329,8 +340,19 @@ async def _fetch_paid_events(
 
     cur = await db.execute(sql, tuple(params))
     rows = await cur.fetchall()
-    print("DEBUG resident feed:", len(rows), "days=", days, "category=", category, "only_top=", only_top, "params=",
-          params)
+
+    print(
+        "DEBUG resident feed:",
+        len(rows),
+        "days=",
+        days,
+        "category=",
+        category,
+        "only_top=",
+        only_top,
+        "params=",
+        params,
+    )
 
     out: list[EventCard] = []
     for r in rows:
@@ -354,7 +376,12 @@ async def _fetch_paid_events(
     return out
 
 
-def _format_card_text(e: EventCard) -> str:
+def _format_card_text(e: EventCard) -> tuple[str, bool]:
+    """
+    Возвращает:
+      (text, has_more)
+    где has_more=True если описание длиннее PREVIEW_LEN и нужно показать кнопку "Подробнее"
+    """
     d = _event_best_date(e)
     t = (e.event_time or "").strip()
 
@@ -366,11 +393,9 @@ def _format_card_text(e: EventCard) -> str:
     elif t and not d:
         when = f"⏰ <b>Время:</b> {t}"
 
-    # category в базе реально заполнен (с эмодзи), category_text может быть пустым
     cat_raw = (getattr(e, "category", "") or "").strip()
     if not cat_raw:
         cat_raw = (e.category_text or "").strip()
-
     cat_line = f"🎭 <b>Категория:</b> {cat_raw}" if cat_raw else ""
 
     loc_line = f"📍 <b>Место:</b> {e.location}" if e.location else ""
@@ -378,17 +403,20 @@ def _format_card_text(e: EventCard) -> str:
 
     badge = "🔥 <b>Рекомендуем</b>\n" if _is_top_recommended(e) else ""
 
-    desc = (e.description or "").strip()
-    if desc:
-        desc = html.escape(desc)
-        if len(desc) > 350:
-            desc = desc[:350].rstrip() + "…"
-        desc_line = f"📝 {desc}"
+    desc_raw = (e.description or "").strip()
+    has_more = False
+    if desc_raw:
+        desc_escaped = html.escape(desc_raw)
+        if len(desc_raw) > PREVIEW_LEN:
+            has_more = True
+            desc_line = f"📝 {desc_escaped[:PREVIEW_LEN].rstrip()}…"
+        else:
+            desc_line = f"📝 {desc_escaped}"
     else:
         desc_line = ""
 
     lines = [
-        badge + f"🧾 <b>{e.title}</b>",
+        badge + f"🧾 <b>{html.escape(e.title)}</b>",
         cat_line,
         desc_line,
         when,
@@ -396,7 +424,7 @@ def _format_card_text(e: EventCard) -> str:
         price_line,
     ]
     lines = [x for x in lines if x]
-    return "\n".join(lines)
+    return "\n".join(lines), has_more
 
 
 def _ticket_kb(e: EventCard) -> InlineKeyboardMarkup | None:
@@ -415,6 +443,21 @@ def _ticket_kb(e: EventCard) -> InlineKeyboardMarkup | None:
         inline_keyboard=[[InlineKeyboardButton(text="🎟 Купить билет", url=link)]]
     )
 
+
+def _details_kb(event_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📄 Подробнее", callback_data=f"resident_details:{event_id}")
+    return kb.as_markup()
+
+
+def _merge_inline_kb(*kbs: InlineKeyboardMarkup | None) -> InlineKeyboardMarkup | None:
+    rows: list[list[InlineKeyboardButton]] = []
+    for kb in kbs:
+        if kb and kb.inline_keyboard:
+            rows.extend(kb.inline_keyboard)
+    return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
+
+
 async def _send_feed(message: Message, events: list[EventCard]) -> None:
     if not events:
         await message.answer(
@@ -432,8 +475,11 @@ async def _send_feed(message: Message, events: list[EventCard]) -> None:
 
     for e in events:
         photo_id = await _get_first_photo_file_id(e.id)
-        text = _format_card_text(e)
-        ikb = _ticket_kb(e)
+        text, has_more = _format_card_text(e)
+
+        details_kb = _details_kb(e.id) if has_more else None
+        ticket_kb = _ticket_kb(e)
+        ikb = _merge_inline_kb(details_kb, ticket_kb)
 
         # 1) Если фото есть — пробуем отправить карточку с фото
         if photo_id:
@@ -446,21 +492,60 @@ async def _send_feed(message: Message, events: list[EventCard]) -> None:
                 )
                 continue
             except Exception as ex:
-                # Важно: покажем первичную причину, иначе не понять почему фото не ушло
                 print(f"WARN: failed to send photo for event_id={e.id}, photo_id={photo_id!r}: {ex}")
 
-        # 2) Фолбэк: отправляем без фото (но с кнопкой если она валидна)
+        # 2) Фолбэк: отправляем без фото
         try:
             await message.answer(text, reply_markup=ikb, parse_mode="HTML")
         except Exception as ex:
-            # 3) Последний фолбэк: вообще без клавиатуры (на случай проблем с URL)
+            # 3) Последний фолбэк: вообще без клавиатуры
             print(f"WARN: failed to send text card with kb for event_id={e.id}: {ex}")
             await message.answer(text, parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("resident_details:"))
+async def resident_details(cb: CallbackQuery) -> None:
+    try:
+        _, raw_id = (cb.data or "").split(":", 1)
+        event_id = int(raw_id)
+    except Exception:
+        await cb.answer("Не удалось открыть описание 😕", show_alert=True)
+        return
+
+    e = await _fetch_event_by_id(event_id)
+    if not e:
+        await cb.answer("Событие не найдено 😕", show_alert=True)
+        return
+
+    desc = (e.description or "").strip()
+    if not desc:
+        await cb.answer("Описание отсутствует", show_alert=True)
+        return
+
+    full_text = (
+        f"📄 <b>Полное описание</b>\n"
+        f"🧾 <b>{html.escape(e.title)}</b>\n\n"
+        f"{html.escape(desc)}"
+    )
+
+    ticket_kb = _ticket_kb(e)
+
+    # Важно: закрываем "часики" сразу, чтобы не ловить timeout
+    try:
+        await cb.answer()
+    except Exception:
+        pass
+
+    try:
+        await cb.message.answer(full_text, reply_markup=ticket_kb, parse_mode="HTML")
+    except Exception:
+        # если вдруг HTML не зашёл
+        await cb.message.answer(full_text, reply_markup=ticket_kb)
+
 
 @router.message(F.text == "🏠 Житель")
 async def resident_entry(message: Message, state: FSMContext) -> None:
     await state.clear()
-    # Житель = платная лента (только продвинутые). notify не попадает (это уже в SQL only_top)
     await state.update_data(only_top=True, days=None, category=None)
 
     events = await _fetch_paid_events(limit=FEED_LIMIT, only_top=True)
@@ -472,7 +557,7 @@ async def resident_refresh(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     days = data.get("days")
     category = data.get("category")
-    only_top = bool(data.get("only_top", True))  # по умолчанию считаем, что режим "Житель" платный
+    only_top = bool(data.get("only_top", True))
 
     events = await _fetch_paid_events(limit=FEED_LIMIT, days=days, category=category, only_top=only_top)
     await _send_feed(message, events)
@@ -488,7 +573,7 @@ async def resident_choose_date(message: Message, state: FSMContext) -> None:
 async def resident_apply_date(message: Message, state: FSMContext) -> None:
     days = DATE_FILTERS[message.text]
 
-    # Период выбран — сбрасываем категорию, чтобы фильтры не наслаивались
+    # Период выбран — сбрасываем категорию
     await state.update_data(days=days, category=None, only_top=False)
 
     events = await _fetch_paid_events(limit=FEED_LIMIT, days=days, category=None, only_top=False)
@@ -509,15 +594,8 @@ async def resident_apply_category(message: Message, state: FSMContext) -> None:
         await resident_back(message, state)
         return
 
-    # ожидаем "🎵 Концерт" / "🎭 Спектакль" / ...
     parts = txt.split(maxsplit=1)
-    if len(parts) == 2:
-        category = parts[1].strip()
-    else:
-        # если вдруг текст без эмодзи/пробела
-        category = txt
-
-    # приводим к нижнему регистру, чтобы совпало с базовой логикой фильтрации
+    category = parts[1].strip() if len(parts) == 2 else txt
     category = category.lower()
 
     await state.update_data(category=category, days=None, only_top=False)
@@ -540,6 +618,5 @@ async def resident_only_top(message: Message, state: FSMContext) -> None:
 
 @router.message(F.text == "⬅️ Назад")
 async def resident_back(message: Message, state: FSMContext) -> None:
-    # просто очищаем state; главное меню остаётся у /start (как у тебя уже сделано)
     await state.clear()
     await message.answer("Ок 👍 Возвращаю в главное меню. Нажми /start")
