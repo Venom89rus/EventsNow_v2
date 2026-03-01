@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-
+import html
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
@@ -107,6 +107,7 @@ class EventCard:
     title: str
     category: str
     category_text: str
+    description: str
     start_date: str | None
     event_date: str | None
     event_time: str | None
@@ -306,10 +307,19 @@ async def _fetch_paid_events(
 
     sql = f"""
     SELECT
-        id, title, category, category_text,
-        start_date, event_date, event_time,
-        location, price_text, ticket_link,
-        promoted_kind, highlighted
+        id,
+        title,
+        category,
+        category_text,
+        COALESCE(description, '') AS description,
+        start_date,
+        event_date,
+        event_time,
+        location,
+        price_text,
+        ticket_link,
+        promoted_kind,
+        highlighted
     FROM events
     WHERE {where_sql}
     ORDER BY {order_by}
@@ -330,6 +340,7 @@ async def _fetch_paid_events(
                 title=str(r["title"] or ""),
                 category=str(r["category"] or ""),
                 category_text=str(r["category_text"] or ""),
+                description=str(r["description"] or ""),
                 start_date=r["start_date"],
                 event_date=r["event_date"],
                 event_time=r["event_time"],
@@ -367,9 +378,19 @@ def _format_card_text(e: EventCard) -> str:
 
     badge = "🔥 <b>Рекомендуем</b>\n" if _is_top_recommended(e) else ""
 
+    desc = (e.description or "").strip()
+    if desc:
+        desc = html.escape(desc)
+        if len(desc) > 350:
+            desc = desc[:350].rstrip() + "…"
+        desc_line = f"📝 {desc}"
+    else:
+        desc_line = ""
+
     lines = [
         badge + f"🧾 <b>{e.title}</b>",
         cat_line,
+        desc_line,
         when,
         loc_line,
         price_line,
