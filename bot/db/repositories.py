@@ -945,3 +945,26 @@ def _event_is_actual(row: Any, today: Optional[date] = None) -> bool:
 
 
 repo = Repo()
+
+# Compatibility wrapper for admin.py (старый интерфейс репозитория)
+class EventRepository(Repo):
+    def __init__(self, *args, **kwargs):
+        # admin.py может делать EventRepository(db) — аргументы принимаем и игнорируем,
+        # потому что внутри Repo используется singleton get_db()
+        super().__init__()
+
+    async def get_events_by_status(self, status: str, limit: int = 30) -> list[Event]:
+        """
+        Старый метод, который ожидает admin.py.
+        """
+        # Если просят pending — можно использовать уже готовую функцию
+        if str(status) == "pending":
+            return await get_pending_events(limit=limit)
+
+        db = get_db()
+        cur = await db.execute(
+            "SELECT * FROM events WHERE status = ? ORDER BY id DESC LIMIT ?",
+            (str(status), int(limit)),
+        )
+        rows = await cur.fetchall()
+        return [_row_to_event(r) for r in rows]

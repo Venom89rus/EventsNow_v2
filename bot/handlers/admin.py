@@ -21,6 +21,14 @@ from typing import Any, Optional
 
 router = Router()
 
+def _val(obj, key: str, default: str = ""):
+    """Безопасно достаёт поле из dict/dataclass/ORM-объекта (Event и т.п.)."""
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
 
 # =========================
 # ADMIN IDS
@@ -146,8 +154,15 @@ def build_admin_caption(event: Any) -> tuple[str, bool]:
         date_text = f"{_safe(_ev(event, 'sessions_start_date'))} — {_safe(_ev(event, 'sessions_end_date'))}"
         time_text = _safe(_ev(event, "sessions_times"))
     else:
-        date_text = _safe(_ev(event, "event_date"))
-        time_text = _safe(_ev(event, "event_time"))
+        date_text = _safe(
+            _ev(event, "event_date") or
+            _ev(event, "start_date")
+        )
+        time_text = _safe(
+            _ev(event, "event_time") or
+            _ev(event, "start_time") or
+            _ev(event, "open_time")
+        )
 
     desc_full = _safe(_ev(event, "description"), "")
     desc_short, cut = short_desc(desc_full, 100)
