@@ -35,18 +35,26 @@ def organizer_menu_kb() -> ReplyKeyboardMarkup:
 
 
 def categories_kb() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="🎵 Концерт")],
-            [KeyboardButton(text="🎭 Спектакль")],
-            [KeyboardButton(text="🧑‍🎓 Мастер-класс")],
-            [KeyboardButton(text="🖼 Выставка")],
-            [KeyboardButton(text="🎤 Лекция")],
-            [KeyboardButton(text="📌 Другое")],
-            [KeyboardButton(text="⬅️ Назад")],
-        ],
-        resize_keyboard=True,
-    )
+    # 2 кнопки в ряд (чтобы не было скролла)
+    cats = [
+        "🎵 Концерт",
+        "🎭 Спектакль",
+        "🧑‍🎓 Мастер-класс",
+        "🖼 Выставка",
+        "🎤 Лекция",
+        "📌 Другое",
+    ]
+
+    rows: list[list[KeyboardButton]] = []
+    for i in range(0, len(cats), 2):
+        row = [KeyboardButton(text=cats[i])]
+        if i + 1 < len(cats):
+            row.append(KeyboardButton(text=cats[i + 1]))
+        rows.append(row)
+
+    rows.append([KeyboardButton(text="⬅️ Назад")])
+
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 
 def format_kb() -> ReplyKeyboardMarkup:
