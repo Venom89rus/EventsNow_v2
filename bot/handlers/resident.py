@@ -69,17 +69,35 @@ def date_kb() -> ReplyKeyboardMarkup:
 
 
 def categories_kb() -> ReplyKeyboardMarkup:
-    # 2 кнопки в ряд
+    # красивые разные значки + подписи с большой буквы
+    ICONS = {
+        "концерт": "🎵",
+        "спектакль": "🎭",
+        "мастер-класс": "🧑‍🎓",
+        "выставка": "🖼️",
+        "лекция": "🎤",
+        "другое": "✨",
+    }
+
+    def pretty_name(s: str) -> str:
+        s = (s or "").strip()
+        return s[:1].upper() + s[1:] if s else s
+
     rows = []
-    cats = RESIDENT_CATEGORIES[:]
+    cats = RESIDENT_CATEGORIES[:]  # ["концерт", "спектакль", ...]
     for i in range(0, len(cats), 2):
-        row = [KeyboardButton(text=f"🎭 {cats[i]}")]
+        c1 = cats[i]
+        b1 = KeyboardButton(text=f"{ICONS.get(c1, '🎭')} {pretty_name(c1)}")
+        row = [b1]
+
         if i + 1 < len(cats):
-            row.append(KeyboardButton(text=f"🎭 {cats[i+1]}"))
+            c2 = cats[i + 1]
+            b2 = KeyboardButton(text=f"{ICONS.get(c2, '🎭')} {pretty_name(c2)}")
+            row.append(b2)
+
         rows.append(row)
 
     rows.append([KeyboardButton(text="⬅️ Назад")])
-
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 
@@ -463,13 +481,25 @@ async def resident_choose_category(message: Message, state: FSMContext) -> None:
     await message.answer("Выбери категорию:", reply_markup=categories_kb())
 
 
-@router.message(StateFilter(ResidentBrowse.choose_category), F.text.startswith("🎭 "))
+@router.message(StateFilter(ResidentBrowse.choose_category))
 async def resident_apply_category(message: Message, state: FSMContext) -> None:
-    category = message.text.replace("🎭", "", 1).strip()
+    txt = (message.text or "").strip()
+    if txt == "⬅️ Назад":
+        await resident_back(message, state)
+        return
 
-    # Категория выбрана — сбрасываем период, чтобы фильтры не наслаивались
+    # ожидаем "🎵 Концерт" / "🎭 Спектакль" / ...
+    parts = txt.split(maxsplit=1)
+    if len(parts) == 2:
+        category = parts[1].strip()
+    else:
+        # если вдруг текст без эмодзи/пробела
+        category = txt
+
+    # приводим к нижнему регистру, чтобы совпало с базовой логикой фильтрации
+    category = category.lower()
+
     await state.update_data(category=category, days=None, only_top=False)
-
     events = await _fetch_paid_events(limit=FEED_LIMIT, days=None, category=category, only_top=False)
     await state.set_state(None)
     await _send_feed(message, events)
